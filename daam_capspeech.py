@@ -346,24 +346,24 @@ def visualize_maps(
 
 EXAMPLES = [
     {
-        "transcript": "From these genres and from these spaces, you know, and the feelings of what these games can bring.",
-        "caption": "An elderly woman, with a low-pitched voice, delivers her speech in a slow, yet expressive and animated manner. Her words flow like a captivating story, each sentence filled with emotion and wisdom, resonating deeply with her audience.",
+        "transcript": "Hello world.",
+        "caption": "A calm male voice.",
     },
     {
-        "transcript": "Use hir or ze as gender neutral pronouns?",
-        "caption": "A male speaker delivers his words in a measured pace, exhibiting a high-pitched, happy, and animated tone in a clean environment.",
+        "transcript": "The weather is so nice today because of the bright yellow sun.",
+        "caption": "A cheerful female voice.",
     },
     {
-        "transcript": "in germany they generally hock the kaiser",
-        "caption": "Her voice, a combination of feminine allure and intellectual brilliance, resonates with a sense of calm and elegance, making her every word a testament to her cool sophistication.",
+        "transcript": "I love music and I love dance.",
+        "caption": "A warm, expressive voice.",
     },
     {
-        "transcript": "i want to see what he was when he was bright and young before the world had hardened him",
-        "caption": "A mature male voice, rough and husky, ideal for public speaking engagements.",
+        "transcript": "Good morning everyone, I am happy to be here today.",
+        "caption": "A deep, slow male voice.",
     },
     {
-        "transcript": "If only I had pursued my passion for dance earlier, I could have become a professional dancer.",
-        "caption": "A voice tinged with regret, conveying a sense of longing for what could have been.",
+        "transcript": "Thank you very much for your time and your attention.",
+        "caption": "A soft, gentle female voice.",
     },
 ]
 
