@@ -1,0 +1,17 @@
+torch>=2.0.0
+torchaudio
+torchvision
+torchdiffeq
+einops
+transformers>=4.46.1,<=4.46.1
+x_transformers
+g2p_en
+laion_clap
+huggingface_hub
+soundfile
+librosa
+numpy
+matplotlib
+sentencepiece
+protobuf>=4.0.0
+accelerate
