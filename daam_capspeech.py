@@ -1,19 +1,3 @@
-"""
-DAAM (Diffusion Attentive Attribution Maps) adapted for CapSpeech.
-
-Public API with the four deliverable functions:
-  - extract_attn()    — Task 1: capture cross-attention maps during inference
-  - upsample_attn()   — Task 2: map attention to spectrogram time axis
-  - aggregate_attn()   — Task 3: aggregate across layers/steps into per-token heatmaps
-  - visualize_maps()   — Task 4: overlay token heatmaps on spectrogram plots
-
-Reference:
-  - Tang et al., "What the DAAM: Interpreting Stable Diffusion Using
-    Cross Attention" (ACL / arXiv)
-  - Wang et al., "CapSpeech: Enabling Downstream Applications in
-    Style-Captioned Text-to-Speech" (arXiv)
-"""
-
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
@@ -31,8 +15,10 @@ from daam.upsample import upsample_map
 from daam.aggregate import aggregate_maps
 from daam.visualize import plot_token_heatmaps
 from daam.utils import pick_inference_device
+from daam.word_regions import words_to_time_regions
+from daam.word_heatmaps import build_word_heatmaps
 
-# Task 1 — Attention Extraction
+# Task 1 - Attention Extraction
 
 @torch.no_grad()
 def extract_attn(
@@ -171,7 +157,7 @@ def extract_attn(
         "metadata": metadata,
     }
 
-# Task 2 — Mapping to Speech
+# Task 2 - Mapping to Speech
 
 def upsample_attn(
     attention_maps: Dict[Tuple[int, int], torch.Tensor],
@@ -212,9 +198,7 @@ def upsample_attn(
     return out
 
 
-# ---------------------------------------------------------------------------
-# Task 3 — Aggregation
-# ---------------------------------------------------------------------------
+# Task 3 - Aggregation
 
 def aggregate_attn(
     upsampled_maps: Dict[Tuple[int, int], torch.Tensor],
@@ -241,11 +225,6 @@ def aggregate_attn(
         One 2-D heatmap per caption token per batch item.
     """
     return aggregate_maps(upsampled_maps, normalize=normalize)
-
-
-# ---------------------------------------------------------------------------
-# Optimized single-tensor aggregation (used by __main__ fast path)
-# ---------------------------------------------------------------------------
 
 def aggregate_mean_attn(
     mean_attn: torch.Tensor,
@@ -297,9 +276,7 @@ def aggregate_mean_attn(
     return agg
 
 
-# ---------------------------------------------------------------------------
-# Task 4 — Visualization
-# ---------------------------------------------------------------------------
+# Task 4 - Visualization
 
 def visualize_maps(
     heatmaps: torch.Tensor,
@@ -338,11 +315,6 @@ def visualize_maps(
         save_path=save_path,
         max_tokens=max_tokens,
     )
-
-
-# ---------------------------------------------------------------------------
-# __main__ — run 5 example visualizations end-to-end
-# ---------------------------------------------------------------------------
 
 EXAMPLES = [
     {
@@ -452,14 +424,15 @@ if __name__ == "__main__":
             result["attention_mean"], n_mels=n_mels, T_spec=T_spec, normalize="token",
         )
 
-        token_ids = ori_token_ids.squeeze().tolist()
-        token_labels = caption_tokenizer.convert_ids_to_tokens(token_ids)
+        word_regions = words_to_time_regions(transcript, text_tokenizer, T_spec)
+        word_labels = [w for w, _, _ in word_regions]
+        word_heatmaps = build_word_heatmaps(heatmaps, word_regions, normalize="token")
 
         fig_path = os.path.join(args.output_dir, f"example_{idx}.png")
         wav_path = os.path.join(args.output_dir, f"example_{idx}.wav")
 
         visualize_maps(
-            heatmaps, mel_spec, token_labels,
+            word_heatmaps, mel_spec, word_labels,
             save_path=fig_path, max_tokens=args.max_tokens,
         )
         import matplotlib.pyplot as plt
