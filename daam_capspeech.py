@@ -30,6 +30,7 @@ from daam import CapSpeechAttentionHooker
 from daam.upsample import upsample_map
 from daam.aggregate import aggregate_maps
 from daam.visualize import plot_token_heatmaps
+from daam.utils import pick_inference_device
 
 # Task 1 — Attention Extraction
 
@@ -85,9 +86,10 @@ def extract_attn(
     Returns
     -------
     dict with keys:
-        ``"attention_maps"``
-            Dict mapping ``(step: int, layer_idx: int)`` to a Tensor of
-            shape ``(B, heads, audio_frames, caption_tokens)``.
+        ``"attention_mean"``
+            Mean attention tensor of shape
+            ``(B, heads, audio_frames, caption_tokens)`` averaged over
+            all ODE steps and transformer layers.
         ``"mel"``
             Generated mel spectrogram as a Tensor of shape
             ``(B, mel_dim, T_spec)``.
@@ -152,24 +154,18 @@ def extract_attn(
         wav_gen = vocoder(out)
     wav_gen_float = wav_gen.squeeze().cpu().numpy()
 
-    attention_maps = hooker.store.get_all()
-
-    sample_key = next(iter(attention_maps))
-    sample_tensor = attention_maps[sample_key]
-    num_heads = sample_tensor.shape[1]
-    audio_frames = sample_tensor.shape[2]
-    caption_tokens = sample_tensor.shape[3]
+    attention_mean = hooker.store.get_mean()
 
     metadata = {
         "num_steps": hooker.store.num_steps,
         "num_layers": hooker.store.num_layers,
-        "num_heads": num_heads,
-        "audio_frames": audio_frames,
-        "caption_tokens": caption_tokens,
+        "num_heads": attention_mean.shape[1],
+        "audio_frames": attention_mean.shape[2],
+        "caption_tokens": attention_mean.shape[3],
     }
 
     return {
-        "attention_maps": attention_maps,
+        "attention_mean": attention_mean,
         "mel": mel_out,
         "wav": wav_gen_float,
         "metadata": metadata,
@@ -245,6 +241,60 @@ def aggregate_attn(
         One 2-D heatmap per caption token per batch item.
     """
     return aggregate_maps(upsampled_maps, normalize=normalize)
+
+
+# ---------------------------------------------------------------------------
+# Optimized single-tensor aggregation (used by __main__ fast path)
+# ---------------------------------------------------------------------------
+
+def aggregate_mean_attn(
+    mean_attn: torch.Tensor,
+    n_mels: int = 100,
+    T_spec: Optional[int] = None,
+    normalize: str = "token",
+) -> torch.Tensor:
+    """Upsample + head-average + normalize from a single mean-attention tensor.
+
+    This is the memory-efficient fast path that replaces the dict-based
+    ``upsample_attn`` -> ``aggregate_attn`` chain.  It operates on a
+    single pre-averaged tensor, avoiding the need to materialise hundreds
+    of intermediate tensors.
+
+    Parameters
+    ----------
+    mean_attn : Tensor  (B, H, audio_frames, C)
+        Mean attention over all ODE steps and layers, as returned by
+        ``extract_attn()["attention_mean"]``.
+    n_mels : int
+        Number of mel frequency bins (default 100).
+    T_spec : int or None
+        Target time frames.  Defaults to ``audio_frames``.
+    normalize : str
+        ``"token"`` | ``"global"`` | ``"none"``.
+
+    Returns
+    -------
+    Tensor  (B, C, n_mels, T_spec)
+    """
+    if T_spec is None:
+        T_spec = mean_attn.shape[2]
+
+    upsampled = upsample_map(mean_attn, n_mels=n_mels, T_spec=T_spec)
+    # upsampled: (B, H, C, n_mels, T_spec)
+    agg = upsampled.mean(dim=1)  # average over heads -> (B, C, n_mels, T_spec)
+
+    if normalize == "token":
+        cmin = agg.flatten(2).min(dim=2).values[:, :, None, None]
+        cmax = agg.flatten(2).max(dim=2).values[:, :, None, None]
+        span = (cmax - cmin).clamp(min=1e-8)
+        agg = (agg - cmin) / span
+    elif normalize == "global":
+        for b in range(agg.shape[0]):
+            gmin = agg[b].min()
+            gmax = agg[b].max()
+            agg[b] = (agg[b] - gmin) / max(gmax - gmin, 1e-8)
+
+    return agg
 
 
 # ---------------------------------------------------------------------------
@@ -332,12 +382,20 @@ if __name__ == "__main__":
     parser.add_argument("--task", type=str, default="CapTTS",
                         choices=["PT", "CapTTS", "EmoCapTTS", "AccCapTTS", "AgentTTS"])
     parser.add_argument("--output_dir", type=str, default="outputs")
-    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Device string, or 'auto' to use GPU (cuda:0) when available else CPU.",
+    )
     parser.add_argument("--steps", type=int, default=25)
     parser.add_argument("--cfg", type=float, default=2.0)
     parser.add_argument("--max_tokens", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+
+    if args.device == "auto":
+        args.device = pick_inference_device()
 
     from capspeech.nar.generate import seed_everything
     seed_everything(args.seed)
@@ -390,8 +448,9 @@ if __name__ == "__main__":
         n_mels = mel_spec.shape[1]
         T_spec = mel_spec.shape[2]
 
-        upsampled = upsample_attn(result["attention_maps"], n_mels=n_mels, T_spec=T_spec)
-        heatmaps = aggregate_attn(upsampled, normalize="token")
+        heatmaps = aggregate_mean_attn(
+            result["attention_mean"], n_mels=n_mels, T_spec=T_spec, normalize="token",
+        )
 
         token_ids = ori_token_ids.squeeze().tolist()
         token_labels = caption_tokenizer.convert_ids_to_tokens(token_ids)

@@ -20,7 +20,7 @@ from capspeech.nar.model.modules import Attention, AttnProcessor, CrossDiTBlock,
 from capspeech.nar.network.crossdit import CrossDiT
 
 from daam import AttentionStore, CrossAttnCaptureProcessor, CapSpeechAttentionHooker
-from daam_capspeech import extract_attn, upsample_attn, aggregate_attn, visualize_maps
+from daam_capspeech import extract_attn, upsample_attn, aggregate_attn, aggregate_mean_attn, visualize_maps
 
 DEVICE = "cpu"
 torch.manual_seed(42)
@@ -60,11 +60,8 @@ def test_processor_equivalence():
     print(f"  Max absolute difference: {max_diff:.2e}")
     assert max_diff < 1e-5, f"Outputs differ by {max_diff}"
 
-    maps = store.get_all()
-    assert len(maps) == 1, f"Expected 1 map, got {len(maps)}"
-    key = (0, 0)
-    assert key in maps, f"Expected key {key} in maps"
-    attn_tensor = maps[key]
+    assert store.count == 1, f"Expected 1 update, got {store.count}"
+    attn_tensor = store.get_mean()
     assert attn_tensor.shape == (batch, heads, audio_len, ctx_len), (
         f"Expected shape {(batch, heads, audio_len, ctx_len)}, got {attn_tensor.shape}"
     )
@@ -144,16 +141,16 @@ def test_extract_attn_e2e():
         steps=ode_steps, cfg=2.0, sway_sampling_coef=-1.0, device=DEVICE,
     )
 
-    assert "attention_maps" in result
+    assert "attention_mean" in result
+    assert "mel" in result
     assert "wav" in result
     assert "metadata" in result
 
-    maps = result["attention_maps"]
+    mean_attn = result["attention_mean"]
     meta = result["metadata"]
     expected_layers = depth // 2 + 1 + depth // 2
 
     print(f"  metadata: {meta}")
-    # Euler with N time points evaluates fn N-1 times
     expected_fn_evals = ode_steps - 1
     assert meta["num_steps"] == expected_fn_evals, (
         f"Expected {expected_fn_evals} fn evaluations, got {meta['num_steps']}"
@@ -162,18 +159,10 @@ def test_extract_attn_e2e():
         f"Expected {expected_layers} layers, got {meta['num_layers']}"
     )
 
-    expected_entries = expected_fn_evals * expected_layers
-    assert len(maps) == expected_entries, (
-        f"Expected {expected_entries} map entries, got {len(maps)}"
+    assert mean_attn.shape == (batch, 4, audio_len, caption_tokens), (
+        f"Expected mean shape {(batch, 4, audio_len, caption_tokens)}, got {mean_attn.shape}"
     )
-
-    for (step, layer), tensor in maps.items():
-        assert 0 <= step < expected_fn_evals
-        assert 0 <= layer < expected_layers
-        assert tensor.shape[0] == batch
-        assert tensor.shape[1] == 4  # heads
-        assert tensor.shape[2] == audio_len  # audio frames
-        assert tensor.shape[3] == caption_tokens
+    assert mean_attn.dtype == torch.float32
 
     assert isinstance(result["wav"], np.ndarray)
     print(f"  wav shape: {result['wav'].shape}")
@@ -362,6 +351,57 @@ def test_visualize_maps():
     print("  PASSED\n")
 
 
+def test_aggregate_mean_attn():
+    """Verify aggregate_mean_attn produces correct shapes and normalization."""
+    print("=== Test 7: aggregate_mean_attn ===")
+
+    batch, heads, audio_frames, caption_tokens = 2, 4, 30, 8
+    n_mels = 16
+    T_spec = 40
+
+    mean_attn = torch.rand(batch, heads, audio_frames, caption_tokens)
+
+    # --- Shape ---
+    out = aggregate_mean_attn(mean_attn, n_mels=n_mels, T_spec=T_spec, normalize="none")
+    assert out.shape == (batch, caption_tokens, n_mels, T_spec), (
+        f"Expected {(batch, caption_tokens, n_mels, T_spec)}, got {out.shape}"
+    )
+    print("  Shape check passed")
+
+    # --- Token normalization ---
+    out_tok = aggregate_mean_attn(mean_attn, n_mels=n_mels, T_spec=T_spec, normalize="token")
+    for b in range(batch):
+        for c in range(caption_tokens):
+            heatmap = out_tok[b, c]
+            assert abs(heatmap.min().item()) < 1e-6, (
+                f"Token ({b},{c}) min should be ~0, got {heatmap.min().item()}"
+            )
+            assert abs(heatmap.max().item() - 1.0) < 1e-6, (
+                f"Token ({b},{c}) max should be ~1, got {heatmap.max().item()}"
+            )
+    print("  Token normalization passed")
+
+    # --- Global normalization ---
+    out_glob = aggregate_mean_attn(mean_attn, n_mels=n_mels, T_spec=T_spec, normalize="global")
+    for b in range(batch):
+        assert abs(out_glob[b].min().item()) < 1e-6
+        assert abs(out_glob[b].max().item() - 1.0) < 1e-6
+    print("  Global normalization passed")
+
+    # --- T_spec defaults to audio_frames ---
+    out_default = aggregate_mean_attn(mean_attn, n_mels=n_mels, normalize="none")
+    assert out_default.shape == (batch, caption_tokens, n_mels, audio_frames), (
+        f"Expected T_spec default to audio_frames={audio_frames}"
+    )
+    print("  T_spec default passed")
+
+    # --- Non-negativity ---
+    assert (out_tok >= 0).all(), "Found negative values"
+    print("  Non-negativity passed")
+
+    print("  PASSED\n")
+
+
 if __name__ == "__main__":
     test_processor_equivalence()
     test_hooker_discovery()
@@ -369,4 +409,5 @@ if __name__ == "__main__":
     test_upsample_attn()
     test_aggregate_attn()
     test_visualize_maps()
+    test_aggregate_mean_attn()
     print("All tests passed!")

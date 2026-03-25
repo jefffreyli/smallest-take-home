@@ -25,7 +25,7 @@ class CapSpeechAttentionHooker:
         with hooker:
             # run inference — attention maps accumulate in hooker.store
             ...
-        maps = hooker.store.get_all()
+        mean = hooker.store.get_mean()
     """
 
     def __init__(self, model: CrossDiT):
