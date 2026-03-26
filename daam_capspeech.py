@@ -15,8 +15,17 @@ from daam.upsample import upsample_map
 from daam.aggregate import aggregate_maps
 from daam.visualize import plot_token_heatmaps
 from daam.utils import pick_inference_device
-from daam.word_regions import words_to_time_regions
-from daam.word_heatmaps import build_word_heatmaps
+
+import soundfile as sf
+from capspeech.nar.generate import load_model, encode, get_duration
+from capspeech.nar.utils import make_pad_mask
+
+import math
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from capspeech.nar.generate import seed_everything
+import config
 
 # Task 1 - Attention Extraction
 
@@ -202,42 +211,37 @@ def upsample_attn(
 
 def aggregate_attn(
     upsampled_maps: Dict[Tuple[int, int], torch.Tensor],
-    normalize: str = "token",
 ) -> torch.Tensor:
     """Aggregate upsampled attention maps into per-token heatmaps.
 
     Averages across all ODE steps, transformer layers, and attention
-    heads, then normalises so heatmaps are comparable across tokens.
+    heads, then min-max normalizes each token independently to [0, 1].
 
     Parameters
     ----------
     upsampled_maps : dict
         Output of ``upsample_attn()`` — maps ``(step, layer_idx)`` to
         tensors of shape ``(B, H, C, n_mels, T_spec)``.
-    normalize : str
-        ``"token"``  — min-max each token independently to [0, 1].
-        ``"global"`` — min-max across all tokens per batch item.
-        ``"none"``   — return raw mean values.
 
     Returns
     -------
     Tensor  (B, C, n_mels, T_spec)
         One 2-D heatmap per caption token per batch item.
     """
-    return aggregate_maps(upsampled_maps, normalize=normalize)
+    return aggregate_maps(upsampled_maps)
 
 def aggregate_mean_attn(
     mean_attn: torch.Tensor,
     n_mels: int = 100,
     T_spec: Optional[int] = None,
-    normalize: str = "token",
 ) -> torch.Tensor:
     """Upsample + head-average + normalize from a single mean-attention tensor.
 
     This is the memory-efficient fast path that replaces the dict-based
     ``upsample_attn`` -> ``aggregate_attn`` chain.  It operates on a
     single pre-averaged tensor, avoiding the need to materialise hundreds
-    of intermediate tensors.
+    of intermediate tensors.  Each token is min-max normalized
+    independently to [0, 1].
 
     Parameters
     ----------
@@ -248,8 +252,6 @@ def aggregate_mean_attn(
         Number of mel frequency bins (default 100).
     T_spec : int or None
         Target time frames.  Defaults to ``audio_frames``.
-    normalize : str
-        ``"token"`` | ``"global"`` | ``"none"``.
 
     Returns
     -------
@@ -259,19 +261,12 @@ def aggregate_mean_attn(
         T_spec = mean_attn.shape[2]
 
     upsampled = upsample_map(mean_attn, n_mels=n_mels, T_spec=T_spec)
-    # upsampled: (B, H, C, n_mels, T_spec)
-    agg = upsampled.mean(dim=1)  # average over heads -> (B, C, n_mels, T_spec)
+    agg = upsampled.mean(dim=1)
 
-    if normalize == "token":
-        cmin = agg.flatten(2).min(dim=2).values[:, :, None, None]
-        cmax = agg.flatten(2).max(dim=2).values[:, :, None, None]
-        span = (cmax - cmin).clamp(min=1e-8)
-        agg = (agg - cmin) / span
-    elif normalize == "global":
-        for b in range(agg.shape[0]):
-            gmin = agg[b].min()
-            gmax = agg[b].max()
-            agg[b] = (agg[b] - gmin) / max(gmax - gmin, 1e-8)
+    cmin = agg.flatten(2).min(dim=2).values[:, :, None, None]
+    cmax = agg.flatten(2).max(dim=2).values[:, :, None, None]
+    span = (cmax - cmin).clamp(min=1e-8)
+    agg = (agg - cmin) / span
 
     return agg
 
@@ -316,6 +311,7 @@ def visualize_maps(
         max_tokens=max_tokens,
     )
 
+# Main
 EXAMPLES = [
     {
         "transcript": "Hello world.",
@@ -341,41 +337,23 @@ EXAMPLES = [
 
 
 if __name__ == "__main__":
-    import argparse
-    import math
-    import matplotlib
-    matplotlib.use("Agg")
+    task = config.TASK
+    output_dir = config.OUTPUT_DIR
+    device = config.DEVICE
+    steps = config.STEPS
+    cfg = config.CFG
+    max_tokens = config.MAX_TOKENS
+    seed = config.SEED
 
-    import soundfile as sf
-    from capspeech.nar.generate import load_model, encode, get_duration
-    from capspeech.nar.utils import make_pad_mask
+    if device == "auto":
+        device = pick_inference_device()
 
-    parser = argparse.ArgumentParser(description="Generate DAAM visualizations for CapSpeech")
-    parser.add_argument("--task", type=str, default="CapTTS",
-                        choices=["PT", "CapTTS", "EmoCapTTS", "AccCapTTS", "AgentTTS"])
-    parser.add_argument("--output_dir", type=str, default="outputs")
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        help="Device string, or 'auto' to use GPU (cuda:0) when available else CPU.",
-    )
-    parser.add_argument("--steps", type=int, default=25)
-    parser.add_argument("--cfg", type=float, default=2.0)
-    parser.add_argument("--max_tokens", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+    seed_everything(seed)
 
-    if args.device == "auto":
-        args.device = pick_inference_device()
+    os.makedirs(output_dir, exist_ok=True)
 
-    from capspeech.nar.generate import seed_everything
-    seed_everything(args.seed)
-
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    print(f"Device: {args.device}")
-    model_list = load_model(args.device, args.task)
+    print(f"Device: {device}")
+    model_list = load_model(device, task)
     (model, vocoder, phn2num, text_tokenizer, clap_model,
      duration_tokenizer, duration_model, caption_tokenizer, caption_encoder) = model_list
 
@@ -388,15 +366,15 @@ if __name__ == "__main__":
         tag = "none"
         phn = encode(transcript, text_tokenizer)
         text_tokens = [phn2num[p] for p in phn]
-        text = torch.LongTensor(text_tokens).unsqueeze(0).to(args.device)
+        text = torch.LongTensor(text_tokens).unsqueeze(0).to(device)
 
         with torch.no_grad():
             batch_enc = caption_tokenizer(caption, return_tensors="pt")
-            ori_token_ids = batch_enc["input_ids"].to(args.device)
-            prompt = caption_encoder(input_ids=ori_token_ids).last_hidden_state.squeeze().unsqueeze(0).to(args.device)
+            ori_token_ids = batch_enc["input_ids"].to(device)
+            prompt = caption_encoder(input_ids=ori_token_ids).last_hidden_state.squeeze().unsqueeze(0).to(device)
 
             tag_embed = clap_model.get_text_embedding([tag], use_tensor=True)
-            clap = tag_embed.squeeze().unsqueeze(0).to(args.device)
+            clap = tag_embed.squeeze().unsqueeze(0).to(device)
 
             duration_inputs = caption + " <NEW_SEP> " + transcript
             duration_inputs = duration_tokenizer(
@@ -406,14 +384,14 @@ if __name__ == "__main__":
             predicted_dur = duration_model(**duration_inputs).logits.squeeze().item()
             duration = get_duration(transcript, predicted_dur)
 
-        audio_clips = torch.zeros([1, math.ceil(duration * 24000 / 256), 100]).to(args.device)
+        audio_clips = torch.zeros([1, math.ceil(duration * 24000 / 256), 100]).to(device)
         seq_len_prompt = prompt.shape[1]
         prompt_lens = torch.Tensor([seq_len_prompt])
         prompt_mask = make_pad_mask(prompt_lens, seq_len_prompt).to(prompt.device)
 
         result = extract_attn(
             model, vocoder, audio_clips, None, text, prompt, clap, prompt_mask,
-            steps=args.steps, cfg=args.cfg, sway_sampling_coef=-1.0, device=args.device,
+            steps=steps, cfg=cfg, sway_sampling_coef=-1.0, device=device,
         )
 
         mel_spec = result["mel"]
@@ -421,24 +399,23 @@ if __name__ == "__main__":
         T_spec = mel_spec.shape[2]
 
         heatmaps = aggregate_mean_attn(
-            result["attention_mean"], n_mels=n_mels, T_spec=T_spec, normalize="token",
+            result["attention_mean"], n_mels=n_mels, T_spec=T_spec,
         )
 
-        word_regions = words_to_time_regions(transcript, text_tokenizer, T_spec)
-        word_labels = [w for w, _, _ in word_regions]
-        word_heatmaps = build_word_heatmaps(heatmaps, word_regions, normalize="token")
+        token_ids = ori_token_ids.squeeze().tolist()
+        token_labels = caption_tokenizer.convert_ids_to_tokens(token_ids)
 
-        fig_path = os.path.join(args.output_dir, f"example_{idx}.png")
-        wav_path = os.path.join(args.output_dir, f"example_{idx}.wav")
+        fig_path = os.path.join(output_dir, f"example_{idx}.png")
+        wav_path = os.path.join(output_dir, f"example_{idx}.wav")
 
         visualize_maps(
-            word_heatmaps, mel_spec, word_labels,
-            save_path=fig_path, max_tokens=args.max_tokens,
+            heatmaps, mel_spec, token_labels,
+            save_path=fig_path, max_tokens=max_tokens,
         )
-        import matplotlib.pyplot as plt
+        
         plt.close("all")
 
         sf.write(wav_path, result["wav"], 24000)
         print(f"  Saved: {fig_path}, {wav_path}")
 
-    print(f"\nAll 5 examples saved to {args.output_dir}/")
+    print(f"\nAll 5 examples saved to {output_dir}/")

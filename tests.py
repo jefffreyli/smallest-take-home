@@ -247,51 +247,27 @@ def test_aggregate_attn():
     }
 
     # --- 1. Shape ---
-    out = aggregate_attn(upsampled, normalize="none")
+    out = aggregate_attn(upsampled)
     assert out.shape == (batch, caption_tokens, n_mels, T_spec), (
         f"Expected {(batch, caption_tokens, n_mels, T_spec)}, got {out.shape}"
     )
     print("  Shape check passed")
 
-    # --- 2. Token normalization ---
-    out_tok = aggregate_attn(upsampled, normalize="token")
-    assert out_tok.shape == (batch, caption_tokens, n_mels, T_spec)
+    # --- 2. Per-token min-max normalization ---
     for b in range(batch):
         for c in range(caption_tokens):
-            heatmap = out_tok[b, c]
+            heatmap = out[b, c]
             assert abs(heatmap.min().item()) < 1e-6, (
                 f"Token ({b},{c}) min should be ~0, got {heatmap.min().item()}"
             )
             assert abs(heatmap.max().item() - 1.0) < 1e-6, (
                 f"Token ({b},{c}) max should be ~1, got {heatmap.max().item()}"
             )
-    print("  Token normalization check passed")
+    print("  Per-token normalization check passed")
 
-    # --- 3. Global normalization ---
-    out_glob = aggregate_attn(upsampled, normalize="global")
-    assert out_glob.shape == (batch, caption_tokens, n_mels, T_spec)
-    for b in range(batch):
-        all_tokens = out_glob[b]  # (C, n_mels, T_spec)
-        assert abs(all_tokens.min().item()) < 1e-6, (
-            f"Batch {b} global min should be ~0, got {all_tokens.min().item()}"
-        )
-        assert abs(all_tokens.max().item() - 1.0) < 1e-6, (
-            f"Batch {b} global max should be ~1, got {all_tokens.max().item()}"
-        )
-    print("  Global normalization check passed")
-
-    # --- 4. No normalization returns raw means ---
-    out_none = aggregate_attn(upsampled, normalize="none")
-    stacked = torch.stack(list(upsampled.values()), dim=0)
-    expected = stacked.mean(dim=0).mean(dim=1)
-    assert torch.allclose(out_none, expected, atol=1e-6), (
-        "normalize='none' should return raw mean values"
-    )
-    print("  No normalization check passed")
-
-    # --- 5. Single entry edge case ---
+    # --- 3. Single entry edge case ---
     single = {(0, 0): torch.rand(batch, heads, caption_tokens, n_mels, T_spec)}
-    out_single = aggregate_attn(single, normalize="token")
+    out_single = aggregate_attn(single)
     assert out_single.shape == (batch, caption_tokens, n_mels, T_spec)
     for b in range(batch):
         for c in range(caption_tokens):
@@ -362,41 +338,33 @@ def test_aggregate_mean_attn():
     mean_attn = torch.rand(batch, heads, audio_frames, caption_tokens)
 
     # --- Shape ---
-    out = aggregate_mean_attn(mean_attn, n_mels=n_mels, T_spec=T_spec, normalize="none")
+    out = aggregate_mean_attn(mean_attn, n_mels=n_mels, T_spec=T_spec)
     assert out.shape == (batch, caption_tokens, n_mels, T_spec), (
         f"Expected {(batch, caption_tokens, n_mels, T_spec)}, got {out.shape}"
     )
     print("  Shape check passed")
 
-    # --- Token normalization ---
-    out_tok = aggregate_mean_attn(mean_attn, n_mels=n_mels, T_spec=T_spec, normalize="token")
+    # --- Per-token min-max normalization ---
     for b in range(batch):
         for c in range(caption_tokens):
-            heatmap = out_tok[b, c]
+            heatmap = out[b, c]
             assert abs(heatmap.min().item()) < 1e-6, (
                 f"Token ({b},{c}) min should be ~0, got {heatmap.min().item()}"
             )
             assert abs(heatmap.max().item() - 1.0) < 1e-6, (
                 f"Token ({b},{c}) max should be ~1, got {heatmap.max().item()}"
             )
-    print("  Token normalization passed")
-
-    # --- Global normalization ---
-    out_glob = aggregate_mean_attn(mean_attn, n_mels=n_mels, T_spec=T_spec, normalize="global")
-    for b in range(batch):
-        assert abs(out_glob[b].min().item()) < 1e-6
-        assert abs(out_glob[b].max().item() - 1.0) < 1e-6
-    print("  Global normalization passed")
+    print("  Per-token normalization passed")
 
     # --- T_spec defaults to audio_frames ---
-    out_default = aggregate_mean_attn(mean_attn, n_mels=n_mels, normalize="none")
+    out_default = aggregate_mean_attn(mean_attn, n_mels=n_mels)
     assert out_default.shape == (batch, caption_tokens, n_mels, audio_frames), (
         f"Expected T_spec default to audio_frames={audio_frames}"
     )
     print("  T_spec default passed")
 
     # --- Non-negativity ---
-    assert (out_tok >= 0).all(), "Found negative values"
+    assert (out >= 0).all(), "Found negative values"
     print("  Non-negativity passed")
 
     print("  PASSED\n")

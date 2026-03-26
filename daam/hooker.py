@@ -19,8 +19,7 @@ class CapSpeechAttentionHooker:
     inside every ``CrossDiTBlock.cross_attn`` with a
     ``CrossAttnCaptureProcessor``.
 
-    Usage::
-
+    Example usage:
         hooker = CapSpeechAttentionHooker(model)
         with hooker:
             # run inference — attention maps accumulate in hooker.store
@@ -34,8 +33,6 @@ class CapSpeechAttentionHooker:
         self._processors: List[CrossAttnCaptureProcessor] = []
         self._originals: List[Tuple[Attention, AttnProcessor]] = []
 
-    # -- discovery ----------------------------------------------------------
-
     @staticmethod
     def _find_cross_attn_modules(model: CrossDiT) -> List[Attention]:
         """Return every ``cross_attn`` Attention module in block order
@@ -48,9 +45,10 @@ class CapSpeechAttentionHooker:
             modules.append(block.cross_attn)
         return modules
 
-    # -- hook / unhook ------------------------------------------------------
-
     def hook(self) -> None:
+        """
+        Hook the model by replacing the AttnProcessor inside every CrossDiTBlock.cross_attn with a CrossAttnCaptureProcessor.
+        """
         cross_attns = self._find_cross_attn_modules(self.model)
         for layer_idx, attn_module in enumerate(cross_attns):
             original = attn_module.processor
@@ -69,13 +67,10 @@ class CapSpeechAttentionHooker:
         self._originals.clear()
         self._processors.clear()
 
-    # -- capture toggle -----------------------------------------------------
-
     def set_capture(self, enabled: bool) -> None:
+        """Set the capture enabled state for all processors."""
         for p in self._processors:
             p.capture_enabled = enabled
-
-    # -- context manager ----------------------------------------------------
 
     def __enter__(self):
         self.hook()
