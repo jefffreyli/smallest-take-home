@@ -1,3 +1,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+outputs/
+*.wav
+*.png
+~/.cache/huggingface/
+
+guide.md

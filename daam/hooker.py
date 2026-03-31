@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "CapSpeech"))
@@ -30,8 +30,8 @@ class CapSpeechAttentionHooker:
     def __init__(self, model: CrossDiT):
         self.model = model
         self.store = AttentionStore()
-        self._processors: List[CrossAttnCaptureProcessor] = []
-        self._originals: List[Tuple[Attention, AttnProcessor]] = []
+        self.processors: List[CrossAttnCaptureProcessor] = []
+        self.originals: List[Tuple[Attention, AttnProcessor]] = []
 
     @staticmethod
     def _find_cross_attn_modules(model: CrossDiT) -> List[Attention]:
@@ -43,35 +43,37 @@ class CapSpeechAttentionHooker:
         modules.append(model.mid_block.cross_attn)
         for block in model.out_blocks:
             modules.append(block.cross_attn)
-        return modules
+        return modules # list of attention blocks, one per cross-attention layer
 
     def hook(self) -> None:
         """
         Hook the model by replacing the AttnProcessor inside every CrossDiTBlock.cross_attn with a CrossAttnCaptureProcessor.
         """
         cross_attns = self._find_cross_attn_modules(self.model)
-        for layer_idx, attn_module in enumerate(cross_attns):
-            original = attn_module.processor
-            capture = CrossAttnCaptureProcessor(
+        for layer_idx, attn_module in enumerate[Any](cross_attns):
+            original_processor = attn_module.processor
+            capture_processor = CrossAttnCaptureProcessor(
                 store=self.store,
                 layer_idx=layer_idx,
-                original_processor=original,
+                original_processor=original_processor,
             )
-            self._originals.append((attn_module, original))
-            self._processors.append(capture)
-            attn_module.processor = capture
+            self.originals.append((attn_module, original_processor)) # save the original processor for later restoration
+            self.processors.append(capture_processor) # save the capture processor for later use
+            attn_module.processor = capture_processor # replace the original processor with the capture processor
 
     def unhook(self) -> None:
-        for attn_module, original in self._originals:
-            attn_module.processor = original
-        self._originals.clear()
-        self._processors.clear()
+        for attn_module, original_processor in self.originals:
+            attn_module.processor = original_processor
+        self.originals.clear()
+        self.processors.clear()
 
     def set_capture(self, enabled: bool) -> None:
         """Set the capture enabled state for all processors."""
-        for p in self._processors:
+        for p in self.processors:
             p.capture_enabled = enabled
 
+    # Dunder methods enter, exit pattern to make the class a context manager; 
+    # allows use of 'with' statement to automatically hook and unhook the model
     def __enter__(self):
         self.hook()
         return self

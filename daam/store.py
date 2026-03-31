@@ -21,31 +21,31 @@ class AttentionStore:
     """
 
     def __init__(self):
-        self._sum: Optional[torch.Tensor] = None
-        self._count: int = 0
+        self.sum: Optional[torch.Tensor] = None # (B, H, audio_frames, C)
+        self.count: int = 0
         self.cur_step: int = 0
-        self._num_steps: int = 0
-        self._layer_indices: set = set()
+        self.num_steps: int = 0
+        self.layer_indices: set = set() # used to report how many unique layers were captured
 
     def update(self, layer_idx: int, attn_weights: torch.Tensor) -> None:
         """Add one attention tensor to the running sum."""
         t = attn_weights.detach().cpu()
-        if self._sum is None:
-            self._sum = torch.zeros_like(t)
-        self._sum += t
-        self._count += 1
-        self._layer_indices.add(layer_idx)
+        if self.sum is None:
+            self.sum = torch.zeros_like(t)
+        self.sum += t
+        self.count += 1
+        self.layer_indices.add(layer_idx)
 
     def step(self) -> None:
         self.cur_step += 1
-        self._num_steps = self.cur_step
+        self.num_steps = self.cur_step
 
     def reset(self) -> None:
-        self._sum = None
-        self._count = 0
+        self.sum = None
+        self.count = 0
         self.cur_step = 0
-        self._num_steps = 0
-        self._layer_indices.clear()
+        self.num_steps = 0
+        self.layer_indices.clear()
 
     def get_mean(self) -> torch.Tensor:
         """Return the mean attention over all accumulated updates.
@@ -54,18 +54,10 @@ class AttentionStore:
         -------
         Tensor  (B, H, audio_frames, caption_tokens)
         """
-        if self._sum is None or self._count == 0:
+        if self.sum is None or self.count == 0:
             raise RuntimeError("No attention maps have been accumulated")
-        return self._sum / self._count
-
-    @property
-    def num_steps(self) -> int:
-        return self._num_steps
+        return self.sum / self.count
 
     @property
     def num_layers(self) -> int:
-        return len(self._layer_indices)
-
-    @property
-    def count(self) -> int:
-        return self._count
+        return len(self.layer_indices)

@@ -1,4 +1,9 @@
 from __future__ import annotations
+from daam.utils import pick_inference_device
+from daam.visualize import plot_token_heatmaps
+from daam.upsample import upsample_map
+from daam import CapSpeechAttentionHooker
+from capspeech.nar.network.crossdit import CrossDiT
 
 from typing import Dict, List, Optional, Tuple
 
@@ -6,26 +11,10 @@ import torch
 from einops import rearrange
 from torchdiffeq import odeint
 
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "CapSpeech"))
 
-from capspeech.nar.network.crossdit import CrossDiT
-from daam import CapSpeechAttentionHooker
-from daam.upsample import upsample_map
-from daam.aggregate import aggregate_maps
-from daam.visualize import plot_token_heatmaps
-from daam.utils import pick_inference_device
-
-import soundfile as sf
-from capspeech.nar.generate import load_model, encode, get_duration
-from capspeech.nar.utils import make_pad_mask
-
-import math
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from capspeech.nar.generate import seed_everything
-import config
 
 # Task 1 - Attention Extraction
 
@@ -101,17 +90,19 @@ def extract_attn(
 
     hooker = CapSpeechAttentionHooker(model)
 
+    # ODE starts from Gaussian noise
     y0 = torch.randn_like(x)
 
-    neg_text = torch.ones_like(text) * -1
+    # Use negative/null inputs for unconditional branch of Classifier-free guidance (CFG)
+    neg_text = torch.ones_like(text) * -1  # negative text tokens
     neg_clap = torch.zeros_like(clap)
     neg_prompt = torch.zeros_like(prompt)
     neg_prompt_mask = torch.zeros_like(prompt_mask)
     neg_prompt_mask[:, 0] = 1
 
     with hooker:
-
         def fn(t, x_t):
+            # conditional pass: capture attention
             hooker.set_capture(True)
             pred = model(
                 x=x_t, cond=cond, text=text, time=t,
@@ -120,6 +111,7 @@ def extract_attn(
                 prompt_mask=prompt_mask,
             )
 
+            # unconditional pass: disable attention capture
             hooker.set_capture(False)
             null_pred = model(
                 x=x_t, cond=cond, text=neg_text, time=t,
@@ -128,7 +120,7 @@ def extract_attn(
                 prompt_mask=neg_prompt_mask,
             )
 
-            hooker.store.step()
+            hooker.store.step()  # increment step counter
 
             return pred + (pred - null_pred) * cfg
 
@@ -168,12 +160,16 @@ def extract_attn(
 
 # Task 2 - Mapping to Speech
 
+
 def upsample_attn(
     attention_maps: Dict[Tuple[int, int], torch.Tensor],
     n_mels: int = 100,
     T_spec: Optional[int] = None,
 ) -> Dict[Tuple[int, int], torch.Tensor]:
-    """Upsample raw attention maps to align with a mel spectrogram grid.
+    """
+    TL;DR: (B, H, audio_frames, caption_tokens) -> (B, H, caption_tokens, n_mels, T_spec)
+
+    Upsample raw attention maps to align with a mel spectrogram grid.
 
     Each input tensor has shape ``(B, H, audio_frames, caption_tokens)``.
     The time curve for every caption token is expanded into a 2-D
@@ -198,50 +194,27 @@ def upsample_attn(
         Same keys as *attention_maps*; values are tensors of shape
         ``(B, H, caption_tokens, n_mels, T_spec)``.
     """
-    out: Dict[Tuple[int, int], torch.Tensor] = {}
+    result: Dict[Tuple[int, int], torch.Tensor] = {}
 
     for key, attn in attention_maps.items():
         t_spec = T_spec if T_spec is not None else attn.shape[2]
-        out[key] = upsample_map(attn, n_mels=n_mels, T_spec=t_spec)
+        result[key] = upsample_map(attn, n_mels=n_mels, T_spec=t_spec)
 
-    return out
+    return result
 
 
 # Task 3 - Aggregation
-
-def aggregate_attn(
-    upsampled_maps: Dict[Tuple[int, int], torch.Tensor],
-) -> torch.Tensor:
-    """Aggregate upsampled attention maps into per-token heatmaps.
-
-    Averages across all ODE steps, transformer layers, and attention
-    heads, then min-max normalizes each token independently to [0, 1].
-
-    Parameters
-    ----------
-    upsampled_maps : dict
-        Output of ``upsample_attn()`` — maps ``(step, layer_idx)`` to
-        tensors of shape ``(B, H, C, n_mels, T_spec)``.
-
-    Returns
-    -------
-    Tensor  (B, C, n_mels, T_spec)
-        One 2-D heatmap per caption token per batch item.
-    """
-    return aggregate_maps(upsampled_maps)
 
 def aggregate_mean_attn(
     mean_attn: torch.Tensor,
     n_mels: int = 100,
     T_spec: Optional[int] = None,
 ) -> torch.Tensor:
-    """Upsample + head-average + normalize from a single mean-attention tensor.
+    """
+   Collapse redundant dimensions (steps, layers, heads) down to a single heatmap per token.
+   Upsample and aggregate attention maps into per-token heatmaps.
 
-    This is the memory-efficient fast path that replaces the dict-based
-    ``upsample_attn`` -> ``aggregate_attn`` chain.  It operates on a
-    single pre-averaged tensor, avoiding the need to materialise hundreds
-    of intermediate tensors.  Each token is min-max normalized
-    independently to [0, 1].
+    Goal: (B, H, audio_frames, C) -> (B, C, n_mels, T_spec)
 
     Parameters
     ----------
@@ -260,9 +233,12 @@ def aggregate_mean_attn(
     if T_spec is None:
         T_spec = mean_attn.shape[2]
 
+    # upsample to (n_mels, T_spec)
     upsampled = upsample_map(mean_attn, n_mels=n_mels, T_spec=T_spec)
+    # average across heads
     agg = upsampled.mean(dim=1)
 
+    # per token min-max normalization
     cmin = agg.flatten(2).min(dim=2).values[:, :, None, None]
     cmax = agg.flatten(2).max(dim=2).values[:, :, None, None]
     span = (cmax - cmin).clamp(min=1e-8)
@@ -310,112 +286,3 @@ def visualize_maps(
         save_path=save_path,
         max_tokens=max_tokens,
     )
-
-# Main
-EXAMPLES = [
-    {
-        "transcript": "Hello world.",
-        "caption": "A calm male voice.",
-    },
-    {
-        "transcript": "The weather is so nice today because of the bright yellow sun.",
-        "caption": "A cheerful female voice.",
-    },
-    {
-        "transcript": "I love music and I love dance.",
-        "caption": "A warm, expressive voice.",
-    },
-    {
-        "transcript": "Good morning everyone, I am happy to be here today.",
-        "caption": "A deep, slow male voice.",
-    },
-    {
-        "transcript": "Thank you very much for your time and your attention.",
-        "caption": "A soft, gentle female voice.",
-    },
-]
-
-
-if __name__ == "__main__":
-    task = config.TASK
-    output_dir = config.OUTPUT_DIR
-    device = config.DEVICE
-    steps = config.STEPS
-    cfg = config.CFG
-    max_tokens = config.MAX_TOKENS
-    seed = config.SEED
-
-    if device == "auto":
-        device = pick_inference_device()
-
-    seed_everything(seed)
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    print(f"Device: {device}")
-    model_list = load_model(device, task)
-    (model, vocoder, phn2num, text_tokenizer, clap_model,
-     duration_tokenizer, duration_model, caption_tokenizer, caption_encoder) = model_list
-
-    for idx, example in enumerate(EXAMPLES, start=1):
-        transcript = example["transcript"]
-        caption = example["caption"]
-        print(f"\n{'='*60}")
-        print(f"Example {idx}: {transcript[:60]}...")
-
-        tag = "none"
-        phn = encode(transcript, text_tokenizer)
-        text_tokens = [phn2num[p] for p in phn]
-        text = torch.LongTensor(text_tokens).unsqueeze(0).to(device)
-
-        with torch.no_grad():
-            batch_enc = caption_tokenizer(caption, return_tensors="pt")
-            ori_token_ids = batch_enc["input_ids"].to(device)
-            prompt = caption_encoder(input_ids=ori_token_ids).last_hidden_state.squeeze().unsqueeze(0).to(device)
-
-            tag_embed = clap_model.get_text_embedding([tag], use_tensor=True)
-            clap = tag_embed.squeeze().unsqueeze(0).to(device)
-
-            duration_inputs = caption + " <NEW_SEP> " + transcript
-            duration_inputs = duration_tokenizer(
-                duration_inputs, return_tensors="pt",
-                padding="max_length", truncation=True, max_length=400,
-            )
-            predicted_dur = duration_model(**duration_inputs).logits.squeeze().item()
-            duration = get_duration(transcript, predicted_dur)
-
-        audio_clips = torch.zeros([1, math.ceil(duration * 24000 / 256), 100]).to(device)
-        seq_len_prompt = prompt.shape[1]
-        prompt_lens = torch.Tensor([seq_len_prompt])
-        prompt_mask = make_pad_mask(prompt_lens, seq_len_prompt).to(prompt.device)
-
-        result = extract_attn(
-            model, vocoder, audio_clips, None, text, prompt, clap, prompt_mask,
-            steps=steps, cfg=cfg, sway_sampling_coef=-1.0, device=device,
-        )
-
-        mel_spec = result["mel"]
-        n_mels = mel_spec.shape[1]
-        T_spec = mel_spec.shape[2]
-
-        heatmaps = aggregate_mean_attn(
-            result["attention_mean"], n_mels=n_mels, T_spec=T_spec,
-        )
-
-        token_ids = ori_token_ids.squeeze().tolist()
-        token_labels = caption_tokenizer.convert_ids_to_tokens(token_ids)
-
-        fig_path = os.path.join(output_dir, f"example_{idx}.png")
-        wav_path = os.path.join(output_dir, f"example_{idx}.wav")
-
-        visualize_maps(
-            heatmaps, mel_spec, token_labels,
-            save_path=fig_path, max_tokens=max_tokens,
-        )
-        
-        plt.close("all")
-
-        sf.write(wav_path, result["wav"], 24000)
-        print(f"  Saved: {fig_path}, {wav_path}")
-
-    print(f"\nAll 5 examples saved to {output_dir}/")

@@ -20,7 +20,7 @@ from capspeech.nar.model.modules import Attention, AttnProcessor, CrossDiTBlock,
 from capspeech.nar.network.crossdit import CrossDiT
 
 from daam import AttentionStore, CrossAttnCaptureProcessor, CapSpeechAttentionHooker
-from daam_capspeech import extract_attn, upsample_attn, aggregate_attn, aggregate_mean_attn, visualize_maps
+from daam_capspeech import extract_attn, upsample_attn, aggregate_mean_attn, visualize_maps
 
 DEVICE = "cpu"
 torch.manual_seed(42)
@@ -235,49 +235,6 @@ def test_upsample_attn():
     print("  PASSED\n")
 
 
-def test_aggregate_attn():
-    """Verify aggregate_attn produces correct shapes, normalization, and edge cases."""
-    print("=== Test 5: aggregate_attn ===")
-
-    batch, heads, caption_tokens, n_mels, T_spec = 2, 4, 6, 8, 20
-
-    upsampled = {
-        (s, l): torch.rand(batch, heads, caption_tokens, n_mels, T_spec) + 0.1
-        for s in range(3) for l in range(2)
-    }
-
-    # --- 1. Shape ---
-    out = aggregate_attn(upsampled)
-    assert out.shape == (batch, caption_tokens, n_mels, T_spec), (
-        f"Expected {(batch, caption_tokens, n_mels, T_spec)}, got {out.shape}"
-    )
-    print("  Shape check passed")
-
-    # --- 2. Per-token min-max normalization ---
-    for b in range(batch):
-        for c in range(caption_tokens):
-            heatmap = out[b, c]
-            assert abs(heatmap.min().item()) < 1e-6, (
-                f"Token ({b},{c}) min should be ~0, got {heatmap.min().item()}"
-            )
-            assert abs(heatmap.max().item() - 1.0) < 1e-6, (
-                f"Token ({b},{c}) max should be ~1, got {heatmap.max().item()}"
-            )
-    print("  Per-token normalization check passed")
-
-    # --- 3. Single entry edge case ---
-    single = {(0, 0): torch.rand(batch, heads, caption_tokens, n_mels, T_spec)}
-    out_single = aggregate_attn(single)
-    assert out_single.shape == (batch, caption_tokens, n_mels, T_spec)
-    for b in range(batch):
-        for c in range(caption_tokens):
-            heatmap = out_single[b, c]
-            assert abs(heatmap.min().item()) < 1e-6
-            assert abs(heatmap.max().item() - 1.0) < 1e-6
-    print("  Single entry edge case passed")
-
-    print("  PASSED\n")
-
 
 def test_visualize_maps():
     """Verify visualize_maps produces a figure and saves to disk."""
@@ -375,7 +332,6 @@ if __name__ == "__main__":
     test_hooker_discovery()
     test_extract_attn_e2e()
     test_upsample_attn()
-    test_aggregate_attn()
     test_visualize_maps()
     test_aggregate_mean_attn()
     print("All tests passed!")

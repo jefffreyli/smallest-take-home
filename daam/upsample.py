@@ -39,9 +39,12 @@ def upsample_map(
     """
     B, H, T_in, C = attn.shape
 
+    # move caption dim before time dim
     x = attn.permute(0, 1, 3, 2)           # (B, H, C, T_in)
-    x = x.reshape(B * H * C, 1, 1, T_in)   # (N, 1, 1, T_in) — single-row 2D
+    # flatten B, H, C into one batch dimension
+    x = x.reshape(B * H * C, 1, 1, T_in) 
 
+    # interpolate to (n_mels, T_spec)
     x = F.interpolate(
         x,
         size=(n_mels, T_spec),
