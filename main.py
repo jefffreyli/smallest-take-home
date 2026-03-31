@@ -21,19 +21,19 @@ EXAMPLES = [
     },
     {
         "transcript": "The weather is so nice today because of the bright yellow sun.",
-        "caption": "A cheerful female voice.",
+        "caption": "A cheerful female voice that peaks in the beginning and then fades out.",
     },
     {
         "transcript": "I love music and I love dance.",
-        "caption": "A warm, expressive voice.",
+        "caption": "A warm, expressive voice that peaks in the middle and then fades out.",
     },
     {
         "transcript": "Good morning everyone, I am happy to be here today.",
-        "caption": "A deep, slow male voice.",
+        "caption": "A deep, slow male voice that gets more excited towards the end.",
     },
     {
         "transcript": "Thank you very much for your time and your attention.",
-        "caption": "A soft, gentle female voice.",
+        "caption": "A soft, gentle female voice that starts off quiet, screams in the middle, then gets quieter towards the end.",
     },
 ]
 
