@@ -19,7 +19,8 @@ import numpy as np
 from capspeech.nar.model.modules import Attention, AttnProcessor, CrossDiTBlock, create_mask
 from capspeech.nar.network.crossdit import CrossDiT
 
-from daam import AttentionStore, CrossAttnCaptureProcessor, CapSpeechAttentionHooker
+from src import AttentionStore, CrossAttnCaptureProcessor, CapSpeechAttentionHooker
+from src.upsample import upsample_map
 from daam_capspeech import extract_attn, upsample_attn, aggregate_mean_attn, visualize_maps
 
 DEVICE = "cpu"
@@ -295,7 +296,8 @@ def test_aggregate_mean_attn():
     mean_attn = torch.rand(batch, heads, audio_frames, caption_tokens)
 
     # --- Shape ---
-    out = aggregate_mean_attn(mean_attn, n_mels=n_mels, T_spec=T_spec)
+    upsampled = upsample_map(mean_attn, n_mels=n_mels, T_spec=T_spec)
+    out = aggregate_mean_attn(upsampled)
     assert out.shape == (batch, caption_tokens, n_mels, T_spec), (
         f"Expected {(batch, caption_tokens, n_mels, T_spec)}, got {out.shape}"
     )
@@ -314,7 +316,8 @@ def test_aggregate_mean_attn():
     print("  Per-token normalization passed")
 
     # --- T_spec defaults to audio_frames ---
-    out_default = aggregate_mean_attn(mean_attn, n_mels=n_mels)
+    upsampled_default = upsample_map(mean_attn, n_mels=n_mels, T_spec=audio_frames)
+    out_default = aggregate_mean_attn(upsampled_default)
     assert out_default.shape == (batch, caption_tokens, n_mels, audio_frames), (
         f"Expected T_spec default to audio_frames={audio_frames}"
     )

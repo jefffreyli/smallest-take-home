@@ -50,9 +50,9 @@ def upsample_map(
         size=(n_mels, T_spec),
         mode=mode,
         align_corners=False,
-    )                                        # (N, 1, n_mels, T_spec)
+    )
 
-    x = x.squeeze(1)                        # (N, n_mels, T_spec)
+    x = x.squeeze(1)
     x = x.reshape(B, H, C, n_mels, T_spec)
     x = x.clamp(min=0.0)
 

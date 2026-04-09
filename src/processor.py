@@ -13,7 +13,7 @@ from capspeech.nar.model.modules import (
     create_mask,
 )
 
-from daam.store import AttentionStore
+from src.store import AttentionStore
 from capspeech.nar.model.modules import apply_rotary_pos_emb
 
 

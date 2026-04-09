@@ -1,8 +1,8 @@
 from __future__ import annotations
-from daam.utils import pick_inference_device
-from daam.visualize import plot_token_heatmaps
-from daam.upsample import upsample_map
-from daam import CapSpeechAttentionHooker
+from src.utils import pick_inference_device
+from src.visualize import plot_token_heatmaps
+from src.upsample import upsample_map
+from src import CapSpeechAttentionHooker
 from capspeech.nar.network.crossdit import CrossDiT
 
 from typing import Dict, List, Optional, Tuple
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "CapSpeech"))
 @torch.no_grad()
 def extract_attn(
     model: CrossDiT,
-    vocoder,
+    vocoder, # converts the mel spectrogram to a waveform
     x: torch.Tensor,
     cond: Optional[torch.Tensor],
     text: torch.Tensor,
@@ -30,7 +30,7 @@ def extract_attn(
     prompt_mask: torch.Tensor,
     *,
     steps: int = 25,
-    cfg: float = 2.0,
+    cfg: float = 2.0, # cfg = w, guidance scalar
     sway_sampling_coef: float = -1.0,
     device: str = "cuda",
 ) -> dict:
@@ -93,13 +93,14 @@ def extract_attn(
     # ODE starts from Gaussian noise
     y0 = torch.randn_like(x)
 
-    # Use negative/null inputs for unconditional branch of Classifier-free guidance (CFG)
+    # CFG setup: Use negative/null inputs for unconditional branch of CFG
     neg_text = torch.ones_like(text) * -1  # negative text tokens
     neg_clap = torch.zeros_like(clap)
     neg_prompt = torch.zeros_like(prompt)
     neg_prompt_mask = torch.zeros_like(prompt_mask)
     neg_prompt_mask[:, 0] = 1
 
+    # CFG
     with hooker:
         def fn(t, x_t):
             # conditional pass: capture attention
@@ -122,8 +123,9 @@ def extract_attn(
 
             hooker.store.step()  # increment step counter
 
-            return pred + (pred - null_pred) * cfg
+            return pred + (pred - null_pred) * cfg # velocity field
 
+        # sway sampling: warps the time curve to concetrate more steps near t=0 to improve sample quality without increasing the number of steps
         t_start = 0
         t = torch.linspace(t_start, 1, steps, device=device)
         if sway_sampling_coef is not None:
@@ -131,16 +133,18 @@ def extract_attn(
                 torch.cos(torch.pi / 2 * t) - 1 + t
             )
 
+        # ODE simulation: solve the ODE using Euler steps to get the trajectory
         trajectory = odeint(fn, y0, t, method="euler")
 
-    out = trajectory[-1]
+    out = trajectory[-1] # final output of the ODE simulation (mel tensor)
     out = rearrange(out, "b n d -> b d n")
     mel_out = out.cpu()
 
     with torch.inference_mode():
-        wav_gen = vocoder(out)
+        wav_gen = vocoder(out) # convert the mel spectrogram to a waveform
     wav_gen_float = wav_gen.squeeze().cpu().numpy()
 
+    # get the mean attention weight matrix over all steps and layers
     attention_mean = hooker.store.get_mean()
 
     metadata = {
@@ -159,7 +163,6 @@ def extract_attn(
     }
 
 # Task 2 - Mapping to Speech
-
 
 def upsample_attn(
     attention_maps: Dict[Tuple[int, int], torch.Tensor],
@@ -206,39 +209,28 @@ def upsample_attn(
 # Task 3 - Aggregation
 
 def aggregate_mean_attn(
-    mean_attn: torch.Tensor,
-    n_mels: int = 100,
-    T_spec: Optional[int] = None,
+    upsampled: torch.Tensor,
 ) -> torch.Tensor:
-    """
-   Collapse redundant dimensions (steps, layers, heads) down to a single heatmap per token.
-   Upsample and aggregate attention maps into per-token heatmaps.
+    """Aggregate an upsampled attention map into per-token heatmaps.
 
-    Goal: (B, H, audio_frames, C) -> (B, C, n_mels, T_spec)
+    Accepts the output of ``upsample_map`` and collapses the head
+    dimension, then applies per-token min-max normalization.
+
+    Goal: (B, H, C, n_mels, T_spec) -> (B, C, n_mels, T_spec)
 
     Parameters
     ----------
-    mean_attn : Tensor  (B, H, audio_frames, C)
-        Mean attention over all ODE steps and layers, as returned by
-        ``extract_attn()["attention_mean"]``.
-    n_mels : int
-        Number of mel frequency bins (default 100).
-    T_spec : int or None
-        Target time frames.  Defaults to ``audio_frames``.
+    upsampled : Tensor  (B, H, C, n_mels, T_spec)
+        Output of ``upsample_map`` applied to ``extract_attn()["attention_mean"]``.
 
     Returns
     -------
     Tensor  (B, C, n_mels, T_spec)
     """
-    if T_spec is None:
-        T_spec = mean_attn.shape[2]
-
-    # upsample to (n_mels, T_spec)
-    upsampled = upsample_map(mean_attn, n_mels=n_mels, T_spec=T_spec)
     # average across heads
     agg = upsampled.mean(dim=1)
 
-    # per token min-max normalization
+    # per token min-max normalization of each token's heatmap to the range [0, 1]
     cmin = agg.flatten(2).min(dim=2).values[:, :, None, None]
     cmax = agg.flatten(2).max(dim=2).values[:, :, None, None]
     span = (cmax - cmin).clamp(min=1e-8)

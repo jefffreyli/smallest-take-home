@@ -188,7 +188,7 @@ def load_model(device, task):
     print("Loading models...")
     params = load_yaml_with_includes(os.path.join(local_dir, "nar_pretrain.yaml"))
     model = CrossDiT(**params['model']).to(device)
-    checkpoint = torch.load(model_path)['model']
+    checkpoint = torch.load(model_path, map_location=device)['model']
     model.load_state_dict(checkpoint, strict=True)
 
     # mel spectrogram

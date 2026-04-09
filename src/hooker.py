@@ -10,8 +10,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "CapSpeech"))
 from capspeech.nar.model.modules import Attention, AttnProcessor
 from capspeech.nar.network.crossdit import CrossDiT
 
-from daam.store import AttentionStore
-from daam.processor import CrossAttnCaptureProcessor
+from src.store import AttentionStore
+from src.processor import CrossAttnCaptureProcessor
 
 
 class CapSpeechAttentionHooker:

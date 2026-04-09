@@ -8,20 +8,12 @@ import torch
 
 
 class AttentionStore:
-    """Accumulates cross-attention weights via a running sum.
-
-    Instead of storing every ``(step, layer)`` tensor in a dict (which
-    can consume tens of GB for a full CapSpeech run), this class keeps a
-    **single accumulator** of shape ``(B, H, audio_frames, C)`` and adds
-    each incoming tensor to it.  Call :meth:`get_mean` at the end to
-    retrieve the average over all steps and layers.
-
-    Tensors are detached and moved to CPU before accumulation to avoid
-    GPU memory buildup.
+    """
+    Accumulates cross-attention weights via a running sum.
     """
 
     def __init__(self):
-        self.sum: Optional[torch.Tensor] = None # (B, H, audio_frames, C)
+        self.sum: Optional[torch.Tensor] = None # matrix A of shape (B, H, audio_frames, C)
         self.count: int = 0
         self.cur_step: int = 0
         self.num_steps: int = 0
@@ -40,15 +32,8 @@ class AttentionStore:
         self.cur_step += 1
         self.num_steps = self.cur_step
 
-    def reset(self) -> None:
-        self.sum = None
-        self.count = 0
-        self.cur_step = 0
-        self.num_steps = 0
-        self.layer_indices.clear()
-
     def get_mean(self) -> torch.Tensor:
-        """Return the mean attention over all accumulated updates.
+        """Return the mean attention weight matrix over all accumulated updates.
 
         Returns
         -------

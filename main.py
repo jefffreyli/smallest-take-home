@@ -9,9 +9,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import config
-from daam.utils import pick_inference_device
+from src.utils import pick_inference_device
 from capspeech.nar.generate import load_model, encode, get_duration, seed_everything
 from capspeech.nar.utils import make_pad_mask
+from src.upsample import upsample_map
 from daam_capspeech import extract_attn, aggregate_mean_attn, visualize_maps
 
 EXAMPLES = [
@@ -67,20 +68,23 @@ def main():
         print(f"Example {idx}: {transcript[:60]}...")
 
         tag = "none"
-        # encode transcript into phoneme tokens
+        # first convert transcript into phoneme tokens (tokenization)
         phn = encode(transcript, text_tokenizer)
+        # then convert phoneme tokens to token IDs (encoding)
         text_tokens = [phn2num[p] for p in phn]
         text = torch.LongTensor(text_tokens).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            # tokenize caption and encode it into a tensor
+            # Tokenize and encode caption into a tensor
             batch_enc = caption_tokenizer(caption, return_tensors="pt")
             ori_token_ids = batch_enc["input_ids"].to(device)
             prompt = caption_encoder(input_ids=ori_token_ids).last_hidden_state.squeeze().unsqueeze(0).to(device)
 
+            # CLAP tag embedding (encodes a sound category tag)
             tag_embed = clap_model.get_text_embedding([tag], use_tensor=True)
             clap = tag_embed.squeeze().unsqueeze(0).to(device)
 
+            # duration prediction for the generated audio
             duration_inputs = caption + " <NEW_SEP> " + transcript
             duration_inputs = duration_tokenizer(
                 duration_inputs, return_tensors="pt",
@@ -94,6 +98,7 @@ def main():
         prompt_lens = torch.Tensor([seq_len_prompt])
         prompt_mask = make_pad_mask(prompt_lens, seq_len_prompt).to(prompt.device)
 
+        # attention extraction
         result = extract_attn(
             model, vocoder, audio_clips, None, text, prompt, clap, prompt_mask,
             steps=steps, cfg=cfg, sway_sampling_coef=-1.0, device=device,
@@ -103,9 +108,10 @@ def main():
         n_mels = mel_spec.shape[1]
         T_spec = mel_spec.shape[2]
 
-        heatmaps = aggregate_mean_attn(
-            result["attention_mean"], n_mels=n_mels, T_spec=T_spec,
-        )
+        # mapping to speech
+        upsampled = upsample_map(result["attention_mean"], n_mels=n_mels, T_spec=T_spec)
+        # aggregate attention per token
+        heatmaps = aggregate_mean_attn(upsampled)
 
         token_ids = ori_token_ids.squeeze().tolist()
         token_labels = caption_tokenizer.convert_ids_to_tokens(token_ids)
@@ -113,6 +119,7 @@ def main():
         fig_path = os.path.join(output_dir, f"example_{idx}.png")
         wav_path = os.path.join(output_dir, f"example_{idx}.wav")
 
+        # visualization
         visualize_maps(
             heatmaps, mel_spec, token_labels,
             save_path=fig_path, max_tokens=max_tokens,
